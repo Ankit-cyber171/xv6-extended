@@ -139,6 +139,8 @@ kexec(char *path, char **argv)
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = ulib.c:start()
   p->trapframe->sp = sp; // initial stack pointer
+  proc_unmap_vmas(p, oldpagetable, 1);
+  proc_vma_init(p);
   proc_freepagetable(oldpagetable, oldsz, (int) (p - proc));
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)

@@ -21,12 +21,20 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
+  int refcnt[(PHYSTOP - KERNBASE) / PGSIZE];
 } kmem;
+
+static int
+pa2idx(void *pa)
+{
+  return ((uint64)pa - KERNBASE) / PGSIZE;
+}
 
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  memset(kmem.refcnt, 0, sizeof(kmem.refcnt));
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -35,8 +43,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
+    kmem.refcnt[pa2idx(p)] = 1;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -51,12 +61,20 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
 
+  acquire(&kmem.lock);
+  int idx = pa2idx(pa);
+  if(kmem.refcnt[idx] < 1)
+    panic("kfree ref");
+  kmem.refcnt[idx]--;
+  if(kmem.refcnt[idx] > 0){
+    release(&kmem.lock);
+    return;
+  }
+
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
@@ -72,11 +90,55 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    kmem.refcnt[pa2idx(r)] = 1;
+  }
   release(&kmem.lock);
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+void
+krefinc(void *pa)
+{
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("krefinc");
+
+  acquire(&kmem.lock);
+  int idx = pa2idx(pa);
+  if(kmem.refcnt[idx] < 1)
+    panic("krefinc ref");
+  kmem.refcnt[idx]++;
+  release(&kmem.lock);
+}
+
+int
+krefcnt(void *pa)
+{
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+    panic("krefcnt");
+
+  acquire(&kmem.lock);
+  int rc = kmem.refcnt[pa2idx(pa)];
+  release(&kmem.lock);
+  return rc;
+}
+
+int
+kfreepages(void)
+{
+    int count = 0;
+    struct run *r;
+
+    acquire(&kmem.lock);
+    r = kmem.freelist;
+    while(r){
+        count++;
+        r = r->next;
+    }
+    release(&kmem.lock);
+    return count;
 }

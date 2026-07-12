@@ -59,6 +59,9 @@ void ireclaim(int);
 void *kalloc(void);
 void kfree(void *);
 void kinit(void);
+void krefinc(void *);
+int krefcnt(void *);
+int kfreepages(void);
 
 // log.c
 void initlog(int, struct superblock *);
@@ -104,6 +107,13 @@ void procdump(void);
 void update_sz(int tgid, uint64 sz);
 int clone(uint64 fn, uint64 arg, uint64 stack);
 int join(void);
+void mlfq_tick(void);
+void mlfq_boost(void);
+int getprocs(uint64, int);
+int setpriority(int, int);
+void proc_vma_init(struct proc *);
+int proc_munmap(struct proc *, uint64, uint64);
+void proc_unmap_vmas(struct proc *, pagetable_t, int);
 
 // swtch.S
 void swtch(struct context *, struct context *);

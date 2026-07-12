@@ -46,3 +46,8 @@ entry("clone");
 entry("join");
 entry("futex_wait");
 entry("futex_wake");
+entry("mmap");
+entry("munmap");
+entry("getprocs");
+entry("getfreemem");
+entry("setpriority");

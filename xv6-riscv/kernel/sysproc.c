@@ -161,3 +161,25 @@ uint64 sys_join(void)
 {
     return join();
 }
+
+uint64 sys_getprocs(void)
+{
+    uint64 addr;
+    int max;
+    argaddr(0, &addr);
+    argint(1, &max);
+    return getprocs(addr, max);
+}
+
+uint64 sys_getfreemem(void)
+{
+    return kfreepages();
+}
+
+uint64 sys_setpriority(void)
+{
+    int pid, priority;
+    argint(0, &pid);
+    argint(1, &priority);
+    return setpriority(pid, priority);
+}

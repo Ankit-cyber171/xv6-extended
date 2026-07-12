@@ -81,6 +81,16 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct vma {
+  int used;
+  uint64 addr;
+  uint64 len;
+  int prot;
+  int flags;
+  uint64 off;
+  struct file *f;
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -105,5 +115,17 @@ struct proc {
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
+  struct vma vmas[MAXVMA];
+  int priority;              // MLFQ priority (0=highest, NMLFQ-1=lowest)
+  int ticks_used;            // ticks consumed at current priority
   char name[16];               // Process name (debugging)
+};
+
+// Info about a process, for getprocs() syscall
+struct procinfo {
+  int pid;
+  int state;     // enum procstate value
+  int priority;  // MLFQ queue level
+  uint64 sz;     // memory size
+  char name[16];
 };

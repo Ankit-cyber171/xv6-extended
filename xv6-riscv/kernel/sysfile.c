@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -49,6 +50,53 @@ fdalloc(struct file *f)
     }
   }
   return -1;
+}
+
+static int
+vma_alloc_slot(struct proc *p)
+{
+  for(int i = 0; i < MAXVMA; i++)
+    if(!p->vmas[i].used)
+      return i;
+  return -1;
+}
+
+static uint64
+vma_find_addr(struct proc *p, uint64 len)
+{
+  struct vma *ord[MAXVMA];
+  int n = 0;
+
+  for(int i = 0; i < MAXVMA; i++)
+    if(p->vmas[i].used)
+      ord[n++] = &p->vmas[i];
+
+  for(int i = 0; i < n; i++){
+    for(int j = i + 1; j < n; j++){
+      if(ord[j]->addr < ord[i]->addr){
+        struct vma *t = ord[i];
+        ord[i] = ord[j];
+        ord[j] = t;
+      }
+    }
+  }
+
+  uint64 low = PGROUNDUP(p->sz);
+  uint64 high = TRAPFRAME(NPROC);
+  uint64 best = 0;
+  uint64 cur = low;
+
+  for(int i = 0; i < n; i++){
+    if(ord[i]->addr > cur && ord[i]->addr - cur >= len)
+      best = ord[i]->addr - len;
+    if(ord[i]->addr + ord[i]->len > cur)
+      cur = ord[i]->addr + ord[i]->len;
+  }
+
+  if(high > cur && high - cur >= len)
+    best = high - len;
+
+  return best;
 }
 
 uint64
@@ -105,6 +153,80 @@ sys_close(void)
   myproc()->ofile[fd] = 0;
   fileclose(f);
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr, len, off;
+  int prot, flags, fd;
+  struct file *f;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argaddr(5, &off);
+
+  if(p->pid != p->tgid)
+    return -1;
+  if(addr != 0 || len == 0)
+    return -1;
+  if(off % PGSIZE)
+    return -1;
+  if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
+    return -1;
+  if((flags & (MAP_SHARED | MAP_PRIVATE)) == 0 ||
+     ((flags & MAP_SHARED) && (flags & MAP_PRIVATE)))
+    return -1;
+
+  if(argfd(4, 0, &f) < 0)
+    return -1;
+  if((prot & PROT_READ) && !f->readable)
+    return -1;
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && !f->writable)
+    return -1;
+  if(f->type != FD_INODE)
+    return -1;
+
+  len = PGROUNDUP(len);
+  int idx = vma_alloc_slot(p);
+  if(idx < 0)
+    return -1;
+
+  uint64 mapaddr = vma_find_addr(p, len);
+  if(mapaddr == 0)
+    return -1;
+
+  p->vmas[idx].used = 1;
+  p->vmas[idx].addr = mapaddr;
+  p->vmas[idx].len = len;
+  p->vmas[idx].prot = prot;
+  p->vmas[idx].flags = flags;
+  p->vmas[idx].off = off;
+  p->vmas[idx].f = filedup(f);
+
+  return mapaddr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, len;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+
+  if(p->pid != p->tgid)
+    return -1;
+  if(addr % PGSIZE || len == 0)
+    return -1;
+
+  len = PGROUNDUP(len);
+  return proc_munmap(p, addr, len);
 }
 
 uint64

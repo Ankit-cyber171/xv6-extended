@@ -12,4 +12,11 @@
 #define FSSIZE       2000  // size of file system in blocks
 #define MAXPATH      128   // maximum file path name
 #define USERSTACK    1     // user stack pages
+#define MAXVMA       16    // max mmap regions per process
+#define NMLFQ         4     // number of MLFQ priority levels
+#define MLFQ_BOOST    100   // boost interval in ticks
+#define MLFQ_SLICE0   1     // time slice for queue 0 (highest)
+#define MLFQ_SLICE1   2     // time slice for queue 1
+#define MLFQ_SLICE2   4     // time slice for queue 2
+#define MLFQ_SLICE3   8     // time slice for queue 3 (lowest)
 

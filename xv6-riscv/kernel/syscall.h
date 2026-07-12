@@ -24,3 +24,8 @@
 #define SYS_join   23
 #define SYS_futex_wait 24
 #define SYS_futex_wake 25
+#define SYS_mmap 26
+#define SYS_munmap 27
+#define SYS_getprocs    28
+#define SYS_getfreemem  29
+#define SYS_setpriority 30

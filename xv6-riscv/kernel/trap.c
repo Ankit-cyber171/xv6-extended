@@ -70,8 +70,8 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
+  } else if((r_scause() == 15 || r_scause() == 13 || r_scause() == 12) &&
+            vmfault(p->pagetable, r_stval(), (r_scause() == 15) ? 0 : 1) != 0) {
     // page fault on lazily-allocated page
   } else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
@@ -83,8 +83,10 @@ usertrap(void)
     kexit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2){
+    mlfq_tick();
     yield();
+  }
 
   prepare_return();
 
@@ -155,8 +157,10 @@ kerneltrap()
   }
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
+  if(which_dev == 2 && myproc() != 0){
+    mlfq_tick();
     yield();
+  }
 
   // the yield() may have caused some traps to occur,
   // so restore trap registers for use by kernelvec.S's sepc instruction.
@@ -171,6 +175,8 @@ clockintr()
     acquire(&tickslock);
     ticks++;
     wakeup(&ticks);
+    if(ticks % MLFQ_BOOST == 0)
+      mlfq_boost();
     release(&tickslock);
   }
 

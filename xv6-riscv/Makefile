@@ -97,7 +97,7 @@ $K/%.o: $K/%.S
 tags: $(OBJS)
 	etags kernel/*.S kernel/*.c
 
-ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
+ULIB = $U/ulib.o $U/semaphore.o $U/usys.o $U/printf.o $U/umalloc.o
 
 _%: %.o $(ULIB) $U/user.ld
 	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $< $(ULIB)
@@ -153,6 +153,14 @@ UPROGS=\
 	$U/_p4\
 	$U/_prod-cons\
 	$U/_rw\
+	$U/_ps\
+	$U/_meminfo\
+	$U/_uptimeinfo\
+	$U/_test_cow\
+	$U/_test_lazy\
+	$U/_test_mlfq\
+	$U/_test_threads\
+	$U/_test_all\
 
 fs.img: mkfs/mkfs README $(UPROGS)
 	mkfs/mkfs fs.img README $(UPROGS)

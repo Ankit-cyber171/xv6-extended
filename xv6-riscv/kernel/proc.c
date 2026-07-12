@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -25,6 +29,100 @@ extern char trampoline[]; // trampoline.S
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+void
+proc_vma_init(struct proc *p)
+{
+    memset(p->vmas, 0, sizeof(p->vmas));
+}
+
+static void
+vma_writeback(struct vma *v, pagetable_t pagetable, uint64 start, uint64 end)
+{
+    if(v->f == 0)
+        return;
+    if((v->flags & MAP_SHARED) == 0)
+        return;
+    if((v->prot & PROT_WRITE) == 0)
+        return;
+
+    for(uint64 a = start; a < end; a += PGSIZE){
+        pte_t *pte = walk(pagetable, a, 0);
+        if(pte == 0 || (*pte & PTE_V) == 0)
+            continue;
+
+        uint64 pa = PTE2PA(*pte);
+        uint64 off = v->off + (a - v->addr);
+        begin_op();
+        ilock(v->f->ip);
+        writei(v->f->ip, 1, pa, off, PGSIZE);
+        iunlock(v->f->ip);
+        end_op();
+    }
+}
+
+int
+proc_munmap(struct proc *p, uint64 addr, uint64 len)
+{
+    uint64 end = addr + len;
+    int changed = 0;
+    if(addr % PGSIZE || len == 0 || end < addr)
+        return -1;
+
+    for(int i = 0; i < MAXVMA; i++){
+        struct vma *v = &p->vmas[i];
+        if(!v->used)
+            continue;
+
+        uint64 vstart = v->addr;
+        uint64 vend = v->addr + v->len;
+        if(end <= vstart || addr >= vend)
+            continue;
+
+        uint64 unmap_start = addr > vstart ? addr : vstart;
+        uint64 unmap_end = end < vend ? end : vend;
+
+        if(unmap_start > vstart && unmap_end < vend)
+            return -1;
+
+        vma_writeback(v, p->pagetable, unmap_start, unmap_end);
+        uvmunmap(p->pagetable, unmap_start, (unmap_end - unmap_start) / PGSIZE, 1);
+        changed = 1;
+
+        if(unmap_start == vstart && unmap_end == vend){
+            if(v->f)
+                fileclose(v->f);
+            memset(v, 0, sizeof(*v));
+        } else if(unmap_start == vstart){
+            v->addr = unmap_end;
+            v->off += unmap_end - unmap_start;
+            v->len = vend - unmap_end;
+        } else if(unmap_end == vend){
+            v->len = unmap_start - vstart;
+        }
+    }
+
+    return changed ? 0 : -1;
+}
+
+void
+proc_unmap_vmas(struct proc *p, pagetable_t pagetable, int close_files)
+{
+    for(int i = 0; i < MAXVMA; i++){
+        struct vma *v = &p->vmas[i];
+        if(!v->used)
+            continue;
+
+        if(pagetable){
+            vma_writeback(v, pagetable, v->addr, v->addr + v->len);
+            uvmunmap(pagetable, v->addr, v->len / PGSIZE, 1);
+        }
+
+        if(close_files && v->f)
+            fileclose(v->f);
+        memset(v, 0, sizeof(*v));
+    }
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -119,6 +217,9 @@ found:
     p->tgid = p->pid;
     p->state = USED;
     p->thread_count = 1;
+    proc_vma_init(p);
+    p->priority = 0;
+    p->ticks_used = 0;
 
     // Allocate a trapframe page.
     if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -154,8 +255,10 @@ static void freeproc(struct proc *p)
     p->trapframe = 0;
     if (p->pagetable) {
         if (p->pid == p->tgid) {
+            proc_unmap_vmas(p, p->pagetable, 1);
             proc_freepagetable(p->pagetable, p->sz, (int)(p - proc));
         } else {
+            proc_unmap_vmas(p, 0, 1);
             uvmunmap(p->pagetable, TRAPFRAME((int)(p - proc)), 1, 0);
         }
     }
@@ -285,6 +388,14 @@ int kfork(void)
         if (p->ofile[i])
             np->ofile[i] = filedup(p->ofile[i]);
     np->cwd = idup(p->cwd);
+
+    for(i = 0; i < MAXVMA; i++){
+        if(!p->vmas[i].used)
+            continue;
+        np->vmas[i] = p->vmas[i];
+        if(np->vmas[i].f)
+            filedup(np->vmas[i].f);
+    }
 
     safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -439,13 +550,6 @@ int kwait(uint64 addr)
     }
 }
 
-// Per-CPU process scheduler.
-// Each CPU calls scheduler() after setting itself up.
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
-//  - swtch to start running that process.
-//  - eventually that process transfers control
-//    via swtch back to the scheduler.
 void scheduler(void)
 {
     struct proc *p;
@@ -453,34 +557,31 @@ void scheduler(void)
 
     c->proc = 0;
     for (;;) {
-        // The most recent process to run may have had interrupts
-        // turned off; enable them to avoid a deadlock if all
-        // processes are waiting. Then turn them back off
-        // to avoid a possible race between an interrupt
-        // and wfi.
         intr_on();
         intr_off();
 
-        int found = 0;
+        struct proc *chosen = 0;
+        int chosen_pri = NMLFQ;
+
         for (p = proc; p < &proc[NPROC]; p++) {
             acquire(&p->lock);
-            if (p->state == RUNNABLE) {
-                // Switch to chosen process.  It is the process's job
-                // to release its lock and then reacquire it
-                // before jumping back to us.
-                p->state = RUNNING;
-                c->proc = p;
-                swtch(&c->context, &p->context);
-
-                // Process is done running for now.
-                // It should have changed its p->state before coming back.
-                c->proc = 0;
-                found = 1;
+            if (p->state == RUNNABLE && p->priority < chosen_pri) {
+                if (chosen)
+                    release(&chosen->lock);
+                chosen = p;
+                chosen_pri = p->priority;
+            } else {
+                release(&p->lock);
             }
-            release(&p->lock);
         }
-        if (found == 0) {
-            // nothing to run; stop running on this core until an interrupt.
+
+        if (chosen) {
+            chosen->state = RUNNING;
+            c->proc = chosen;
+            swtch(&c->context, &chosen->context);
+            c->proc = 0;
+            release(&chosen->lock);
+        } else {
             asm volatile("wfi");
         }
     }
@@ -520,6 +621,46 @@ void yield(void)
     p->state = RUNNABLE;
     sched();
     release(&p->lock);
+}
+
+// Called on each timer interrupt for the running process.
+void
+mlfq_tick(void)
+{
+    struct proc *p = myproc();
+    if(p == 0)
+        return;
+
+    static int mlfq_slice[] = { MLFQ_SLICE0, MLFQ_SLICE1, MLFQ_SLICE2, MLFQ_SLICE3 };
+
+    acquire(&p->lock);
+    p->ticks_used++;
+
+    int pri = p->priority;
+    if(pri < 0) pri = 0;
+    if(pri >= NMLFQ) pri = NMLFQ - 1;
+
+    if(p->ticks_used >= mlfq_slice[pri]){
+        if(p->priority < NMLFQ - 1)
+            p->priority++;
+        p->ticks_used = 0;
+    }
+    release(&p->lock);
+}
+
+// Boost all processes to highest priority to prevent starvation.
+void
+mlfq_boost(void)
+{
+    struct proc *p;
+    for(p = proc; p < &proc[NPROC]; p++){
+        acquire(&p->lock);
+        if(p->state != UNUSED){
+            p->priority = 0;
+            p->ticks_used = 0;
+        }
+        release(&p->lock);
+    }
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -599,6 +740,8 @@ void wakeup(void *chan)
             acquire(&p->lock);
             if (p->state == SLEEPING && p->chan == chan) {
                 p->state = RUNNABLE;
+                p->priority = 0;
+                p->ticks_used = 0;
             }
             release(&p->lock);
         }
@@ -745,6 +888,14 @@ int clone(uint64 fn, uint64 arg, uint64 stack)
             np->ofile[i] = filedup(p->ofile[i]);
     np->cwd = idup(p->cwd);
 
+    for(i = 0; i < MAXVMA; i++){
+        if(!p->vmas[i].used)
+            continue;
+        np->vmas[i] = p->vmas[i];
+        if(np->vmas[i].f)
+            filedup(np->vmas[i].f);
+    }
+
     safestrcpy(np->name, p->name, sizeof(p->name));
 
     pid = np->pid;
@@ -809,4 +960,52 @@ int join(void)
         // Wait for a child to exit.
         sleep(p, &wait_lock); // DOC: wait-sleep
     }
+}
+
+int
+getprocs(uint64 addr, int max)
+{
+    struct proc *p;
+    struct procinfo info;
+    int count = 0;
+    struct proc *curp = myproc();
+
+    for(p = proc; p < &proc[NPROC] && count < max; p++){
+        acquire(&p->lock);
+        if(p->state != UNUSED){
+            info.pid = p->pid;
+            info.state = p->state;
+            info.priority = p->priority;
+            info.sz = p->sz;
+            safestrcpy(info.name, p->name, sizeof(info.name));
+            release(&p->lock);
+            if(copyout(curp->pagetable, addr + count * sizeof(info),
+                       (char *)&info, sizeof(info)) < 0)
+                return -1;
+            count++;
+        } else {
+            release(&p->lock);
+        }
+    }
+    return count;
+}
+
+int
+setpriority(int pid, int priority)
+{
+    if(priority < 0 || priority >= NMLFQ)
+        return -1;
+
+    struct proc *p;
+    for(p = proc; p < &proc[NPROC]; p++){
+        acquire(&p->lock);
+        if(p->pid == pid){
+            p->priority = priority;
+            p->ticks_used = 0;
+            release(&p->lock);
+            return 0;
+        }
+        release(&p->lock);
+    }
+    return -1;
 }

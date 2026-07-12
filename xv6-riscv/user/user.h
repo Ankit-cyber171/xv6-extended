@@ -1,5 +1,13 @@
 #define SBRK_ERROR ((char *)-1)
 
+struct procinfo {
+  int pid;
+  int state;
+  int priority;
+  uint64 sz;
+  char name[16];
+};
+
 struct stat;
 
 // system calls
@@ -28,6 +36,11 @@ int clone(void(*fn)(int *), int *arg, void *stack);
 int join(void);
 int futex_wait(int *uaddr, int val);
 int futex_wake(int *uaddr);
+void *mmap(void *addr, uint64 len, int prot, int flags, int fd, uint64 off);
+int munmap(void *addr, uint64 len);
+int getprocs(struct procinfo*, int);
+int getfreemem(void);
+int setpriority(int pid, int priority);
 
 // ulib.c
 int stat(const char*, struct stat*);

@@ -105,6 +105,11 @@ extern uint64 sys_clone(void);
 extern uint64 sys_join(void);
 extern uint64 sys_futex_wait(void);;
 extern uint64 sys_futex_wake(void);
+extern uint64 sys_mmap(void);
+extern uint64 sys_munmap(void);
+extern uint64 sys_getprocs(void);
+extern uint64 sys_getfreemem(void);
+extern uint64 sys_setpriority(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -134,6 +139,11 @@ static uint64 (*syscalls[])(void) = {
 [SYS_join]    sys_join,
 [SYS_futex_wait] sys_futex_wait,
 [SYS_futex_wake] sys_futex_wake,
+[SYS_mmap]    sys_mmap,
+[SYS_munmap]    sys_munmap,
+[SYS_getprocs]    sys_getprocs,
+[SYS_getfreemem]  sys_getfreemem,
+[SYS_setpriority] sys_setpriority,
 };
 
 void
